@@ -16,11 +16,14 @@ interface ZoneLayerProps {
 export default function ZoneLayer({ map, onZoneClick }: ZoneLayerProps) {
   useEffect(() => {
     let mounted = true
+    let cleanup: (() => void) | undefined
 
     async function addLayers() {
-      const res = await fetch('/dummy-zones.geojson')
+      const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://45.63.18.135:8000'
+      const res = await fetch(`${base}/zones?city_id=toronto`)
       if (!mounted) return
-      const data = await res.json()
+      const json = await res.json()
+      const data = json.zones
 
       map.addSource('zones', { type: 'geojson', data })
 
@@ -74,8 +77,6 @@ export default function ZoneLayer({ map, onZoneClick }: ZoneLayerProps) {
         if (map.getSource('zones')) map.removeSource('zones')
       }
     }
-
-    let cleanup: (() => void) | undefined
 
     addLayers().catch(console.error)
 
