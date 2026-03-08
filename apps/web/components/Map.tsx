@@ -20,13 +20,14 @@ export default function Map() {
     const map = new mapboxgl.Map({
       container: containerRef.current,
       style: 'mapbox://styles/mapbox/dark-v11',
-      center: [-79.3832, 43.6532],
-      zoom: 11,
+      center: [-79.3946, 43.6444],
+      zoom: 13,
     })
 
     map.addControl(new mapboxgl.NavigationControl(), 'bottom-right')
 
     map.on('load', () => {
+      map.fitBounds([[-79.4071, 43.6354], [-79.3821, 43.6534]], { padding: 40 })
       mapRef.current = map
       setMapReady(true)
     })
@@ -44,7 +45,7 @@ export default function Map() {
     setSelectedZone(null)
 
     try {
-      const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+      const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://45.63.18.135:8000'
       const res = await fetch(`${base}/zones/${zoneId}`)
       if (!res.ok) throw new Error(`Server returned ${res.status}`)
       const data: ZoneDetail = await res.json()
