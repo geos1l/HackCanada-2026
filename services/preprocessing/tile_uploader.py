@@ -59,9 +59,9 @@ GRID_PATH = REPO_ROOT / "data" / "processed" / "toronto_grid.geojson"
 ESRI_URL = "https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export"
 ESRI_EXPORT_PX = 1024  # request at final size directly — no resize needed
 TILE_PX = 1024
-REQUEST_TIMEOUT = 20
-MAX_RETRIES = 3
-RETRY_BACKOFF = [10, 20, 40]  # seconds between retries on 500
+REQUEST_TIMEOUT = 15
+MAX_RETRIES = 2
+RETRY_BACKOFF = [3, 6]  # seconds between retries — failed tiles are retried on re-run
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +196,8 @@ def build_and_upload_tile_index(s3, cells: list[dict]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(dry_run: bool = False, workers: int = 2, index_only: bool = False) -> None:
+def main(dry_run: bool = False, workers: int = 16, index_only: bool = False,
+         shard: int = 0, total_shards: int = 1) -> None:
     cells = load_cells()
     s3 = make_s3_client()
 
@@ -207,16 +208,20 @@ def main(dry_run: bool = False, workers: int = 2, index_only: bool = False) -> N
     existing_keys = list_existing_keys(s3)
     missing = [c for c in cells if c["key"] not in existing_keys]
 
-    log.info("Total tiles: %d | Already uploaded: %d | Missing: %d",
-             len(cells), len(cells) - len(missing), len(missing))
+    # Split work across instances: each handles every Nth tile starting at shard index
+    if total_shards > 1:
+        missing = [c for i, c in enumerate(missing) if i % total_shards == shard]
+        log.info("Shard %d/%d — handling %d tiles", shard + 1, total_shards, len(missing))
+    else:
+        log.info("Total tiles: %d | Already uploaded: %d | Missing: %d",
+                 len(cells), len(cells) - len(missing), len(missing))
 
     if dry_run:
         log.info("DRY RUN — no uploads performed")
         return
 
     if not missing:
-        log.info("All tiles already in bucket.")
-        build_and_upload_tile_index(s3, cells)
+        log.info("All tiles in this shard already uploaded.")
         return
 
     failed: list[str] = []
@@ -234,9 +239,11 @@ def main(dry_run: bool = False, workers: int = 2, index_only: bool = False) -> N
 
     log.info("Done. Success: %d | Failed: %d", len(missing) - len(failed), len(failed))
     if failed:
-        log.warning("Failed tiles (re-run script to retry): %d tiles", len(failed))
+        log.warning("Failed tiles (re-run to retry): %d tiles", len(failed))
 
-    build_and_upload_tile_index(s3, cells)
+    # Only shard 0 regenerates tile_index.json — run after all shards finish
+    if shard == 0:
+        build_and_upload_tile_index(s3, cells)
 
 
 if __name__ == "__main__":
@@ -244,5 +251,8 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--index-only", action="store_true")
+    parser.add_argument("--shard", type=int, default=0, help="Shard index (0-based)")
+    parser.add_argument("--total-shards", type=int, default=1, help="Total number of shards")
     args = parser.parse_args()
-    main(dry_run=args.dry_run, workers=args.workers, index_only=args.index_only)
+    main(dry_run=args.dry_run, workers=args.workers, index_only=args.index_only,
+         shard=args.shard, total_shards=args.total_shards)
