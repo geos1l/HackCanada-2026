@@ -18,6 +18,7 @@ def generate_zone_summary(zone_data: dict) -> str:
     Be specific. Mention surface conditions and expected cooling impact.
     Do not use jargon. Write as if explaining to a non-technical city official.
     """
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    # Use gemini-2.0-flash; 1.5-pro/1.5-flash often 404 on v1beta
+model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content(prompt)
     return response.text
