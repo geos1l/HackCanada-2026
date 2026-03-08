@@ -19,6 +19,6 @@ def generate_zone_summary(zone_data: dict) -> str:
     Do not use jargon. Write as if explaining to a non-technical city official.
     """
     # Use gemini-2.0-flash; 1.5-pro/1.5-flash often 404 on v1beta
-model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content(prompt)
     return response.text
