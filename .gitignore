@@ -1,3 +1,6 @@
+/*.md
 
-.venv
+# Local environment and credentials
 .env
+config/gee_service_account.json
+.venv
