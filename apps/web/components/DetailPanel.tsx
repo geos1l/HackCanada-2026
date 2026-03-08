@@ -54,7 +54,7 @@ export default function DetailPanel({ zone, loading, error, onClose }: DetailPan
             <div className="bg-gray-800 rounded-lg p-3">
               <p className="text-xs text-gray-400 mb-1">Mean heat above city median</p>
               <p className="text-2xl font-bold text-white">
-                +{zone.mean_relative_heat.toFixed(1)}
+                {zone.mean_relative_heat >= 0 ? '+' : ''}{zone.mean_relative_heat.toFixed(1)}
                 <span className="text-base font-normal text-gray-400"> °C</span>
               </p>
             </div>

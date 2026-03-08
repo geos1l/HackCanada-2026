@@ -16,6 +16,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from shapely.geometry import shape
 
+from ..gemini import generate_zone_summary
+
 router = APIRouter()
 
 
@@ -70,13 +72,25 @@ def get_zone(zone_id: str, request: Request):
     row = match.iloc[0]
     mrh = row.mean_relative_heat
     mrh = None if pd.isna(mrh) else float(mrh)
+    contributors = _to_list(row.top_contributors if hasattr(row, "top_contributors") else [])
+    recommendations = _to_list(row.top_recommendations if hasattr(row, "top_recommendations") else [])
+    summary = str(row.gemini_summary) if hasattr(row, "gemini_summary") and pd.notna(row.gemini_summary) else ""
+
+    if not summary:
+        summary = generate_zone_summary({
+            "severity": row.severity,
+            "mean_relative_heat": mrh,
+            "top_contributors": contributors,
+            "top_recommendations": recommendations,
+        })
+
     return {
         "zone_id": row.zone_id,
         "severity": row.severity,
         "mean_relative_heat": mrh,
-        "top_contributors": _to_list(row.top_contributors if hasattr(row, "top_contributors") else []),
-        "top_recommendations": _to_list(row.top_recommendations if hasattr(row, "top_recommendations") else []),
-        "gemini_summary": str(row.gemini_summary) if hasattr(row, "gemini_summary") and pd.notna(row.gemini_summary) else "",
+        "top_contributors": contributors,
+        "top_recommendations": recommendations,
+        "gemini_summary": summary,
     }
 
 
