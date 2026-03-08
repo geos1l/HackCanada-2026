@@ -281,6 +281,7 @@ def main(test_mode: bool = False, aoi_bbox: str = DEFAULT_AOI_BBOX, limit: int =
     tile_names = sorted(tile_index.keys())
     log.info("Running inference on %d tiles...", len(tile_names))
 
+    skipped = 0
     for i, tile_name in enumerate(tile_names):
         mask_name = Path(tile_name).stem + ".npy"
         mask_path = MASK_DIR / mask_name
@@ -298,7 +299,13 @@ def main(test_mode: bool = False, aoi_bbox: str = DEFAULT_AOI_BBOX, limit: int =
 
         log.info("[%d/%d] %s", i + 1, len(tile_names), tile_name)
 
-        png_bytes = download_from_bucket(s3, tile_name)
+        try:
+            png_bytes = download_from_bucket(s3, tile_name)
+        except Exception as e:
+            log.warning("SKIP %s — not in bucket (%s)", tile_name, e)
+            skipped += 1
+            continue
+
         image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         mask = infer_tile(image, model, processor, device)
 
@@ -326,7 +333,7 @@ def main(test_mode: bool = False, aoi_bbox: str = DEFAULT_AOI_BBOX, limit: int =
     with open(mask_index_path, "w") as f:
         json.dump(mask_index, f, indent=2)
 
-    log.info("Done. %d masks saved to %s", len(mask_index["tiles"]), MASK_DIR)
+    log.info("Done. %d masks saved, %d skipped (missing from bucket) -> %s", len(mask_index["tiles"]), skipped, MASK_DIR)
     log.info(
         "=== CHECKPOINT 2: All tiles processed ===\n"
         ">>> USER CHECK: Spot-check a few masks in data/processed/segmentation_masks/. "
