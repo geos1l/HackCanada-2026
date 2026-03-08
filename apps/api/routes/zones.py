@@ -21,7 +21,7 @@ router = APIRouter()
 def _zone_feature(row) -> dict:
     return {
         "type": "Feature",
-        "geometry": json.loads(row.geometry.to_json()) if row.geometry else None,
+        "geometry": row.geometry.__geo_interface__ if row.geometry else None,
         "properties": {
             "zone_id": row.zone_id,
             "city_id": row.city_id,
