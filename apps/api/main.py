@@ -40,8 +40,11 @@ async def lifespan(app: FastAPI):
     log.info("Loading data...")
 
     if ZONES_PATH.exists():
-        app.state.zones_gdf = gpd.read_file(ZONES_PATH)
-        log.info("Loaded zones.geojson: %d zones", len(app.state.zones_gdf))
+        zones_gdf = gpd.read_file(ZONES_PATH)
+        if zones_gdf.crs and zones_gdf.crs.to_epsg() != 4326:
+            zones_gdf = zones_gdf.to_crs(epsg=4326)
+        app.state.zones_gdf = zones_gdf
+        log.info("Loaded zones.geojson: %d zones (CRS: WGS84)", len(app.state.zones_gdf))
     else:
         log.warning("zones.geojson not found — using empty GeoDataFrame")
         app.state.zones_gdf = gpd.GeoDataFrame()
@@ -54,8 +57,11 @@ async def lifespan(app: FastAPI):
         app.state.predictions = pd.DataFrame()
 
     if GRID_PATH.exists():
-        app.state.grid_gdf = gpd.read_file(GRID_PATH)
-        log.info("Loaded toronto_grid.geojson: %d cells", len(app.state.grid_gdf))
+        grid_gdf = gpd.read_file(GRID_PATH)
+        if grid_gdf.crs and grid_gdf.crs.to_epsg() != 4326:
+            grid_gdf = grid_gdf.to_crs(epsg=4326)
+        app.state.grid_gdf = grid_gdf
+        log.info("Loaded toronto_grid.geojson: %d cells (CRS: WGS84)", len(app.state.grid_gdf))
     else:
         log.warning("toronto_grid.geojson not found — using empty GeoDataFrame")
         app.state.grid_gdf = gpd.GeoDataFrame()

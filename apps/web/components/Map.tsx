@@ -27,7 +27,7 @@ export default function Map() {
     map.addControl(new mapboxgl.NavigationControl(), 'bottom-right')
 
     map.on('load', () => {
-      map.fitBounds([[-79.4071, 43.6354], [-79.3821, 43.6534]], { padding: 40 })
+      map.fitBounds([[-79.4071, 43.6354], [-79.3821, 43.6624]], { padding: 40 })
       mapRef.current = map
       setMapReady(true)
     })
