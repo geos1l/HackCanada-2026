@@ -1,8 +1,11 @@
 import os
 
-import google.generativeai as genai
+from openai import OpenAI
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["GEMINI_API_KEY"],
+)
 
 
 def generate_zone_summary(zone_data: dict) -> str:
@@ -18,6 +21,8 @@ def generate_zone_summary(zone_data: dict) -> str:
     Be specific. Mention surface conditions and expected cooling impact.
     Do not use jargon. Write as if explaining to a non-technical city official.
     """
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(prompt)
-    return response.text
+    response = _client.chat.completions.create(
+        model="google/gemini-2.5-flash-preview",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content
