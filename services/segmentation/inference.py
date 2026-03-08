@@ -1,41 +1,52 @@
 """
 Phase 2A — SegFormer batch inference on orthophoto tiles.
 
-INPUTS (from Julie's inference_prep.py):
-  data/raw/orthophoto_tiles/*.png              Preprocessed RGB tiles
-  data/raw/orthophoto_tiles/tile_index.json    Spatial bounds per tile in EPSG:3347
+Pulls tiles and tile_index.json directly from Vultr Object Storage (S3-compatible).
+Nothing is saved to local disk except the output masks.
 
-  tile_index.json format Julie must produce:
+INPUTS (from Vultr bucket `torontotiles`):
+  tile_index.json              Spatial bounds per tile in EPSG:3347
+  tile_{row:03d}_{col:03d}.png  Preprocessed 1024×1024 RGB tiles
+
+  tile_index.json format:
   {
     "tile_001_002.png": { "bounds": [minx, miny, maxx, maxy], "crs": "EPSG:3347" },
     ...
   }
 
-OUTPUTS:
+OUTPUTS (local):
   data/processed/segmentation_masks/*.npy       Per-tile class mask (H×W uint8)
   data/processed/segmentation_masks/mask_index.json
 
   mask pixel values are raw model class indices.
-  mask_index.json["class_map"] maps index -> schema field name.
+  mask_index.json["class_map"] maps str(index) -> schema field name.
+
+AUTH: .env at project root — VULTR_ACCESS_KEY, VULTR_SECRET_KEY, VULTR_BUCKET, VULTR_ENDPOINT
 
 MODEL: jgerbscheid/segformer_b1-nlver_finetuned-1024-1024
-  Primary classes: buildings, road/pavement, vegetation, water
+  Dutch labels: pand=building, wegdeel=road, overbruggingsdeel=road,
+                waterdeel=water, vegetatie=vegetation, background=residual
   seg_land_pct and seg_unlabeled_pct are derived as residual in aggregate.py
 
 USAGE:
   python -m services.segmentation.inference            # full run
-  python -m services.segmentation.inference --test     # dry run with synthetic tile (no tiles needed)
+  python -m services.segmentation.inference --test     # dry run with synthetic tile (no bucket needed)
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
+import os
 from pathlib import Path
 
+import boto3
 import numpy as np
 import torch
+from botocore.client import Config
+from dotenv import load_dotenv
 from PIL import Image
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
@@ -43,16 +54,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TILE_DIR = REPO_ROOT / "data" / "raw" / "orthophoto_tiles"
+load_dotenv(REPO_ROOT / ".env")
+
 MASK_DIR = REPO_ROOT / "data" / "processed" / "segmentation_masks"
 MODEL_ID = "jgerbscheid/segformer_b1-nlver_finetuned-1024-1024"
 
-# Maps model label strings (lowercased) -> our schema field names
-# Model uses Dutch labels (jgerbscheid trained on Dutch aerial imagery):
-#   pand=building, wegdeel=road, overbruggingsdeel=bridge/overpass, waterdeel=water, vegetatie=vegetation
-#   background -> unmapped, counts as residual (seg_land_pct)
+# Dutch labels (this model) + English fallbacks -> our schema field names
 LABEL_TO_FIELD: dict[str, str] = {
-    # Dutch labels (this model)
+    # Dutch labels (jgerbscheid model trained on Dutch aerial imagery)
     "pand": "building",
     "wegdeel": "road",
     "overbruggingsdeel": "road",
@@ -76,12 +85,37 @@ LABEL_TO_FIELD: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# S3 client
+# ---------------------------------------------------------------------------
+
+def make_s3_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=os.environ["VULTR_ENDPOINT"],
+        aws_access_key_id=os.environ["VULTR_ACCESS_KEY"],
+        aws_secret_access_key=os.environ["VULTR_SECRET_KEY"],
+        config=Config(signature_version="s3v4"),
+    )
+
+
+def download_from_bucket(s3, key: str) -> bytes:
+    bucket = os.environ["VULTR_BUCKET"]
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    return resp["Body"].read()
+
+
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
 def load_model(
     device: str,
 ) -> tuple[SegformerForSemanticSegmentation, SegformerImageProcessor, dict[int, str]]:
     log.info("Loading model: %s", MODEL_ID)
+
     # Some HuggingFace fine-tuned models omit preprocessor_config.json.
-    # Fall back to a standard SegFormer processor with sensible defaults.
+    # Fall back to a standard SegFormer processor with ImageNet defaults.
     try:
         processor = SegformerImageProcessor.from_pretrained(MODEL_ID)
     except OSError:
@@ -93,32 +127,43 @@ def load_model(
             image_mean=[0.485, 0.456, 0.406],
             image_std=[0.229, 0.224, 0.225],
         )
+
     model = SegformerForSemanticSegmentation.from_pretrained(MODEL_ID)
     model.eval()
     model.to(device)
 
-    id2label: dict[int, str] = model.config.id2label
+    # Normalize id2label: HuggingFace returns either a list or a dict with string keys.
+    raw = model.config.id2label
+    if isinstance(raw, list):
+        id2label: dict[int, str] = {i: raw[i] for i in range(len(raw))}
+    else:
+        id2label = {int(k): v for k, v in raw.items()}
+
     log.info("Model id2label: %s", id2label)
 
     class_map: dict[int, str] = {}
     for idx, label in id2label.items():
         field = LABEL_TO_FIELD.get(label.lower())
         if field:
-            class_map[int(idx)] = field
+            class_map[idx] = field
         else:
             log.warning(
                 "Unmapped model class %d=%r — pixels will count as residual (seg_land_pct)",
-                idx,
-                label,
+                idx, label,
             )
 
     log.info("Final class map (model_idx -> schema_field): %s", class_map)
     if not class_map:
         raise RuntimeError(
-            "No model classes mapped to schema fields. Check LABEL_TO_FIELD against model id2label above."
+            "No model classes mapped to schema fields. "
+            "Check LABEL_TO_FIELD against model id2label above."
         )
     return model, processor, class_map
 
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
 
 def infer_tile(
     image: Image.Image,
@@ -136,13 +181,16 @@ def infer_tile(
         mode="bilinear",
         align_corners=False,
     )
-    mask = upsampled.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
-    return mask
+    return upsampled.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.uint8)
 
+
+# ---------------------------------------------------------------------------
+# Test mode
+# ---------------------------------------------------------------------------
 
 def run_test(model, processor, class_map, device):
     """
-    CHECKPOINT 1 — runs without any real tiles.
+    CHECKPOINT 1 — runs without bucket access.
     Verifies model loads and produces correct output shape/dtype.
     """
     log.info("=== CHECKPOINT 1: Synthetic tile inference ===")
@@ -162,10 +210,14 @@ def run_test(model, processor, class_map, device):
     log.info("CHECKPOINT 1 PASSED — model output shape and dtype correct")
     log.info(
         ">>> USER CHECK: Does the class_map above make sense? "
-        "Expected keys: building, road, vegetation, water. "
+        "Expected fields: building, road, vegetation, water. "
         "If any are missing or mislabeled, update LABEL_TO_FIELD in inference.py."
     )
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main(test_mode: bool = False) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -177,21 +229,14 @@ def main(test_mode: bool = False) -> None:
         run_test(model, processor, class_map, device)
         return
 
-    # --- Full run ---
-    tile_index_path = TILE_DIR / "tile_index.json"
-    if not tile_index_path.exists():
-        raise FileNotFoundError(
-            f"tile_index.json not found at {tile_index_path}\n"
-            "Julie's inference_prep.py must produce this file before inference can run."
-        )
-    with open(tile_index_path) as f:
-        tile_index: dict = json.load(f)
+    # --- Full run: pull tiles from Vultr bucket ---
+    s3 = make_s3_client()
+    bucket = os.environ["VULTR_BUCKET"]
 
-    tiles = sorted(TILE_DIR.glob("*.png"))
-    if not tiles:
-        raise FileNotFoundError(f"No PNG tiles found in {TILE_DIR}")
+    log.info("Downloading tile_index.json from bucket %s...", bucket)
+    tile_index: dict = json.loads(download_from_bucket(s3, "tile_index.json"))
+    log.info("tile_index.json loaded: %d tiles", len(tile_index))
 
-    log.info("Found %d tiles", len(tiles))
     MASK_DIR.mkdir(parents=True, exist_ok=True)
 
     mask_index: dict = {
@@ -199,32 +244,47 @@ def main(test_mode: bool = False) -> None:
         "tiles": {},
     }
 
-    for i, tile_path in enumerate(tiles):
-        tile_name = tile_path.name
-        if tile_name not in tile_index:
-            log.warning("Tile %r not in tile_index.json — skipping", tile_name)
+    tile_names = sorted(tile_index.keys())
+    log.info("Running inference on %d tiles...", len(tile_names))
+
+    for i, tile_name in enumerate(tile_names):
+        mask_name = Path(tile_name).stem + ".npy"
+        mask_path = MASK_DIR / mask_name
+
+        # Skip already-processed masks
+        if mask_path.exists():
+            meta = tile_index[tile_name]
+            mask_index["tiles"][mask_name] = {
+                "source_tile": tile_name,
+                "bounds": meta["bounds"],
+                "crs": meta.get("crs", "EPSG:3347"),
+                "shape": list(np.load(mask_path).shape),
+            }
             continue
 
-        log.info("[%d/%d] %s", i + 1, len(tiles), tile_name)
-        image = Image.open(tile_path).convert("RGB")
+        log.info("[%d/%d] %s", i + 1, len(tile_names), tile_name)
+
+        png_bytes = download_from_bucket(s3, tile_name)
+        image = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         mask = infer_tile(image, model, processor, device)
 
-        mask_name = tile_path.stem + ".npy"
-        np.save(MASK_DIR / mask_name, mask)
+        np.save(mask_path, mask)
 
         meta = tile_index[tile_name]
         mask_index["tiles"][mask_name] = {
             "source_tile": tile_name,
-            "bounds": meta["bounds"],  # [minx, miny, maxx, maxy] EPSG:3347
+            "bounds": meta["bounds"],
             "crs": meta.get("crs", "EPSG:3347"),
             "shape": list(mask.shape),
         }
 
-        # Log sample distribution every 10 tiles
         if (i + 1) % 10 == 0 or i == 0:
             unique, counts = np.unique(mask, return_counts=True)
             pcts = counts / counts.sum() * 100
-            dist = {class_map.get(int(c), f"unmapped({c})"): f"{p:.1f}%" for c, p in zip(unique, pcts)}
+            dist = {
+                class_map.get(int(c), f"unmapped({c})"): f"{p:.1f}%"
+                for c, p in zip(unique, pcts)
+            }
             log.info("  Sample class distribution: %s", dist)
 
     mask_index_path = MASK_DIR / "mask_index.json"
@@ -234,9 +294,8 @@ def main(test_mode: bool = False) -> None:
     log.info("Done. %d masks saved to %s", len(mask_index["tiles"]), MASK_DIR)
     log.info(
         "=== CHECKPOINT 2: All tiles processed ===\n"
-        ">>> USER CHECK: Open a few masks in data/processed/segmentation_masks/ "
-        "and visually compare against the source tiles in orthophoto_tiles/. "
-        "Buildings, roads, vegetation, and water should be plausibly segmented."
+        ">>> USER CHECK: Spot-check a few masks in data/processed/segmentation_masks/. "
+        "Buildings, roads, vegetation, water should be plausibly segmented."
     )
 
 
