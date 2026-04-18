@@ -18,8 +18,3 @@ Built at [Hack Canada 2026](https://devpost.com/software/scorched). Live demo at
 3. An XGBoost model predicts relative heat per 100m x 100m grid cell
 4. Hot cells are clustered into zones with severity ratings, top contributors, and recommended interventions
 5. Users explore results on an interactive map with clickable zones and AI-generated summaries
-<<<<<<< Updated upstream
-=======
-
-
->>>>>>> Stashed changes
